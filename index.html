@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Adaptive FPS)</title>
+  <title>YOLO Hen Detection (Final Stable PoC)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -43,14 +43,15 @@
 
     .status {
       margin-top: 10px;
-      font-size: 14px;
+      font-size: 13px;
+      line-height: 1.4;
     }
   </style>
 </head>
 
 <body>
 
-<h3>YOLO Hen Detection (Adaptive FPS)</h3>
+<h3>YOLO Hen Detection (Final Stable PoC)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -70,7 +71,7 @@ const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict"
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
 const overlay = document.getElementById("overlay");
-const octx = overlay.getContext("2d");
+const ctx = overlay.getContext("2d");
 const statusText = document.getElementById("status");
 
 /* ================= DPR FIX ================= */
@@ -79,7 +80,7 @@ overlay.width = SIZE * dpr;
 overlay.height = SIZE * dpr;
 overlay.style.width = SIZE + "px";
 overlay.style.height = SIZE + "px";
-octx.scale(dpr, dpr);
+ctx.scale(dpr, dpr);
 
 /* ================= CAPTURE CANVAS ================= */
 const captureCanvas = document.createElement("canvas");
@@ -90,11 +91,25 @@ const cctx = captureCanvas.getContext("2d");
 /* ================= STATE ================= */
 let running = false;
 let detectTimer = null;
-let latestDetections = [];
-let lastFrameTime = performance.now();
 
-/* 🔥 Adaptive FPS state */
-let detectIntervalMs = 400; // start safe
+let rawDetections = [];
+let smoothedDetections = [];
+
+let lastRenderTime = performance.now();
+let lastDetectTime = performance.now();
+
+/* ================= ADAPTIVE FPS CONTROL ================= */
+let detectIntervalMs = 400;
+let rttEma = null;
+
+const RTT_ALPHA = 0.2;
+const MIN_INTERVAL = 250;
+const MAX_INTERVAL = 800;
+const MAX_STEP_CHANGE = 80;
+
+/* ================= BOX SMOOTHING ================= */
+const BOX_ALPHA = 0.4; // temporal smoothing factor
+const BOX_TTL = 5;     // frames to persist boxes
 
 /* ================= START ================= */
 async function startLive() {
@@ -130,21 +145,23 @@ function stopLive() {
     video.srcObject = null;
   }
 
-  latestDetections = [];
-  octx.clearRect(0, 0, SIZE, SIZE);
+  rawDetections = [];
+  smoothedDetections = [];
+  ctx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
 
-/* ================= ADAPTIVE DETECTION ================= */
+/* ================= DETECTION SCHEDULER ================= */
 function scheduleDetection() {
   if (!running) return;
 
   detectTimer = setTimeout(async () => {
     await runDetection();
-    scheduleDetection(); // reschedule with updated interval
+    scheduleDetection();
   }, detectIntervalMs);
 }
 
+/* ================= DETECTION ================= */
 async function runDetection() {
   if (!running || video.videoWidth === 0) return;
 
@@ -157,56 +174,89 @@ async function runDetection() {
     formData.append("image", blob, "frame.jpg");
 
     try {
-      const start = performance.now();
       const res = await fetch(BACKEND_URL, { method: "POST", body: formData });
       const data = await res.json();
-      const end = performance.now();
 
-      latestDetections = data.detections;
+      rawDetections = data.detections.map(d => ({
+        ...d,
+        ttl: BOX_TTL
+      }));
 
-      /* 🔥 ADAPTIVE FPS LOGIC */
+      /* ===== Adaptive FPS Stabilization ===== */
       const rtt = data.timing.total_ms;
+      rttEma = rttEma === null ? rtt : RTT_ALPHA * rtt + (1 - RTT_ALPHA) * rttEma;
 
-      if (rtt < 150) detectIntervalMs = 250;
-      else if (rtt < 250) detectIntervalMs = 400;
-      else detectIntervalMs = 700;
+      let targetInterval = Math.round(rttEma * 2.2);
+      targetInterval = Math.max(MIN_INTERVAL, Math.min(MAX_INTERVAL, targetInterval));
 
-      const fps = 1000 / (end - lastFrameTime);
-      lastFrameTime = end;
+      const delta = targetInterval - detectIntervalMs;
+      detectIntervalMs += Math.abs(delta) > MAX_STEP_CHANGE
+        ? Math.sign(delta) * MAX_STEP_CHANGE
+        : delta;
 
-      statusText.innerText =
-        `Detections: ${data.count} | ` +
-        `FPS: ${fps.toFixed(1)} | ` +
-        `Infer: ${data.timing.inference_ms} ms | ` +
-        `RTT: ${rtt} ms | ` +
-        `Interval: ${detectIntervalMs} ms`;
+      lastDetectTime = performance.now();
 
     } catch {
-      statusText.innerText = "Detection error";
+      // Silent failure: keep last detections
     }
   }, "image/jpeg", 0.9);
+}
+
+/* ================= SMOOTHING ================= */
+function smoothDetections() {
+  const next = [];
+
+  rawDetections.forEach((det, i) => {
+    const prev = smoothedDetections[i];
+
+    if (!prev) {
+      next.push({ ...det });
+    } else {
+      next.push({
+        ...det,
+        bbox: det.bbox.map((v, j) =>
+          BOX_ALPHA * v + (1 - BOX_ALPHA) * prev.bbox[j]
+        )
+      });
+    }
+  });
+
+  smoothedDetections = next;
+  rawDetections.forEach(d => d.ttl--);
+  rawDetections = rawDetections.filter(d => d.ttl > 0);
 }
 
 /* ================= RENDER LOOP ================= */
 function renderLoop() {
   if (!running) return;
 
-  octx.clearRect(0, 0, SIZE, SIZE);
+  const now = performance.now();
+  const renderFps = 1000 / (now - lastRenderTime);
+  lastRenderTime = now;
 
-  octx.lineWidth = 2;
-  octx.font = "14px Arial";
-  octx.strokeStyle = "red";
-  octx.fillStyle = "red";
+  smoothDetections();
 
-  latestDetections.forEach(det => {
+  ctx.clearRect(0, 0, SIZE, SIZE);
+  ctx.lineWidth = 2;
+  ctx.font = "14px Arial";
+  ctx.strokeStyle = "red";
+  ctx.fillStyle = "red";
+
+  smoothedDetections.forEach(det => {
     const [x1, y1, x2, y2] = det.bbox;
-    octx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    octx.fillText(
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.fillText(
       `Hen ${det.confidence.toFixed(2)}`,
       x1,
       Math.max(15, y1 - 5)
     );
   });
+
+  statusText.innerText =
+    `Render FPS: ${renderFps.toFixed(1)} | ` +
+    `Detect Interval: ${Math.round(detectIntervalMs)} ms | ` +
+    `RTT EMA: ${Math.round(rttEma || 0)} ms | ` +
+    `Boxes: ${smoothedDetections.length}`;
 
   requestAnimationFrame(renderLoop);
 }

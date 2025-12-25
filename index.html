@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Stable)</title>
+  <title>YOLO Hen Detection (Stable & Accurate)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -32,8 +32,6 @@
       position: absolute;
       top: 0;
       left: 0;
-      width: 416px;
-      height: 416px;
       pointer-events: none;
     }
 
@@ -52,7 +50,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (Stable)</h3>
+<h3>YOLO Hen Detection (Stable & Geometry-Correct)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -75,14 +73,20 @@ const overlay = document.getElementById("overlay");
 const octx = overlay.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* ✅ ONE reusable capture canvas */
+/* ================= DPR FIX (IMPORTANT) ================= */
+const dpr = window.devicePixelRatio || 1;
+
+overlay.width = SIZE * dpr;
+overlay.height = SIZE * dpr;
+overlay.style.width = SIZE + "px";
+overlay.style.height = SIZE + "px";
+octx.scale(dpr, dpr);
+
+/* ================= REUSABLE CAPTURE CANVAS ================= */
 const captureCanvas = document.createElement("canvas");
 captureCanvas.width = SIZE;
 captureCanvas.height = SIZE;
 const cctx = captureCanvas.getContext("2d");
-
-overlay.width = SIZE;
-overlay.height = SIZE;
 
 /* ================= STATE ================= */
 let running = false;
@@ -129,13 +133,15 @@ function stopLive() {
   statusText.innerText = "Stopped";
 }
 
-/* ================= DETECTION ================= */
+/* ================= DETECTION LOOP ================= */
 function runDetection() {
   if (!running || video.videoWidth === 0) return;
 
   cctx.drawImage(video, 0, 0, SIZE, SIZE);
 
   captureCanvas.toBlob(blob => {
+    if (!blob) return; // ✅ SAFETY GUARD
+
     const formData = new FormData();
     formData.append("image", blob, "frame.jpg");
 
@@ -164,7 +170,7 @@ function runDetection() {
   }, "image/jpeg", 0.9);
 }
 
-/* ================= RENDER ================= */
+/* ================= RENDER LOOP ================= */
 function renderLoop() {
   if (!running) return;
 

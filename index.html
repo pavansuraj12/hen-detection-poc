@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection — IoU Tracking</title>
+  <title>YOLO Hen Detection — Production Tracking</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -44,7 +44,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (IoU-Based Tracking)</h3>
+<h3>YOLO Hen Detection (Production-Grade Tracking)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -63,6 +63,7 @@ const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict"
 const DETECT_INTERVAL = 400;
 const TRACK_TTL = 6;
 const IOU_THRESHOLD = 0.3;
+const PREDICTION_DAMPING = 0.9; // smooth motion
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
@@ -160,9 +161,11 @@ function iou(a, b) {
   return inter / (areaA + areaB - inter + 1e-6);
 }
 
-/* ================= TRACK UPDATE ================= */
+/* ================= TRACK UPDATE + VELOCITY ================= */
 function updateTracks(detections) {
-  // Decay all tracks
+  const now = performance.now();
+
+  // Decay TTL
   tracks.forEach(t => t.ttl--);
 
   const usedTracks = new Set();
@@ -181,16 +184,27 @@ function updateTracks(detections) {
     });
 
     if (bestMatch && bestIou > IOU_THRESHOLD) {
-      // Update existing track
+      const dt = (now - bestMatch.lastUpdateTime) / 1000;
+
+      // Estimate velocity
+      if (dt > 0) {
+        bestMatch.velocity = bestMatch.bbox.map(
+          (v, i) => (det.bbox[i] - v) / dt
+        );
+      }
+
       bestMatch.bbox = det.bbox;
+      bestMatch.lastUpdateTime = now;
       bestMatch.confidence = det.confidence;
       bestMatch.ttl = TRACK_TTL;
       usedTracks.add(bestMatch.id);
     } else {
-      // Create new track
+      // New track
       tracks.push({
         id: nextTrackId++,
         bbox: det.bbox,
+        velocity: [0, 0, 0, 0],
+        lastUpdateTime: now,
         confidence: det.confidence,
         ttl: TRACK_TTL,
         age: 0
@@ -198,29 +212,42 @@ function updateTracks(detections) {
     }
   });
 
-  // Remove expired tracks
   tracks = tracks.filter(t => t.ttl > 0);
 }
 
-/* ================= RENDER ================= */
+/* ================= RENDER + PREDICTION ================= */
 function renderLoop() {
   if (!running) return;
 
-  ctx.clearRect(0, 0, SIZE, SIZE);
+  const now = performance.now();
 
+  ctx.clearRect(0, 0, SIZE, SIZE);
   ctx.lineWidth = 2;
   ctx.font = "14px Arial";
   ctx.strokeStyle = "lime";
   ctx.fillStyle = "lime";
 
   tracks.forEach(t => {
-    const [x1, y1, x2, y2] = t.bbox;
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    const dt = (now - t.lastUpdateTime) / 1000;
+
+    // Predict next position
+    const predicted = t.bbox.map(
+      (v, i) => v + t.velocity[i] * dt * PREDICTION_DAMPING
+    );
+
+    ctx.strokeRect(
+      predicted[0],
+      predicted[1],
+      predicted[2] - predicted[0],
+      predicted[3] - predicted[1]
+    );
+
     ctx.fillText(
       `Hen ${t.id}`,
-      x1,
-      Math.max(15, y1 - 5)
+      predicted[0],
+      Math.max(15, predicted[1] - 5)
     );
+
     t.age++;
   });
 

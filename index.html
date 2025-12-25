@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Final Stable PoC)</title>
+  <title>YOLO Hen Detection (Interpolated)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -35,23 +35,16 @@
       pointer-events: none;
     }
 
-    button {
-      padding: 10px 16px;
-      margin: 6px;
-      font-size: 14px;
-    }
-
     .status {
-      margin-top: 10px;
       font-size: 13px;
-      line-height: 1.4;
+      margin-top: 8px;
     }
   </style>
 </head>
 
 <body>
 
-<h3>YOLO Hen Detection (Final Stable PoC)</h3>
+<h3>YOLO Hen Detection (Smooth Motion)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -67,55 +60,47 @@
 /* ================= CONFIG ================= */
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
+const INTERP_DURATION = 300; // ms
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
-const overlay = document.getElementById("overlay");
-const ctx = overlay.getContext("2d");
+const canvas = document.getElementById("overlay");
+const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* ================= DPR FIX ================= */
+/* DPR fix */
 const dpr = window.devicePixelRatio || 1;
-overlay.width = SIZE * dpr;
-overlay.height = SIZE * dpr;
-overlay.style.width = SIZE + "px";
-overlay.style.height = SIZE + "px";
+canvas.width = SIZE * dpr;
+canvas.height = SIZE * dpr;
+canvas.style.width = SIZE + "px";
+canvas.style.height = SIZE + "px";
 ctx.scale(dpr, dpr);
 
-/* ================= CAPTURE CANVAS ================= */
-const captureCanvas = document.createElement("canvas");
-captureCanvas.width = SIZE;
-captureCanvas.height = SIZE;
-const cctx = captureCanvas.getContext("2d");
+/* Capture canvas */
+const cap = document.createElement("canvas");
+cap.width = SIZE;
+cap.height = SIZE;
+const capCtx = cap.getContext("2d");
 
 /* ================= STATE ================= */
 let running = false;
 let detectTimer = null;
 
-let rawDetections = [];
-let smoothedDetections = [];
+let boxes = []; // active boxes
 
-let lastRenderTime = performance.now();
-let lastDetectTime = performance.now();
-
-/* ================= ADAPTIVE FPS CONTROL ================= */
-let detectIntervalMs = 400;
-let rttEma = null;
-
-const RTT_ALPHA = 0.2;
-const MIN_INTERVAL = 250;
-const MAX_INTERVAL = 800;
-const MAX_STEP_CHANGE = 80;
-
-/* ================= BOX SMOOTHING ================= */
-const BOX_ALPHA = 0.4; // temporal smoothing factor
-const BOX_TTL = 5;     // frames to persist boxes
+/* ================= BOX STRUCTURE ================= */
+/*
+{
+  prev: [x1,y1,x2,y2],
+  target: [x1,y1,x2,y2],
+  startTime: timestamp,
+  confidence: number
+}
+*/
 
 /* ================= START ================= */
 async function startLive() {
   if (running) return;
-
-  statusText.innerText = "Starting camera...";
 
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" } }
@@ -127,10 +112,10 @@ async function startLive() {
     video.play();
     running = true;
 
-    scheduleDetection();
+    detectLoop();
     requestAnimationFrame(renderLoop);
 
-    statusText.innerText = "Live detection";
+    statusText.innerText = "Live";
   };
 }
 
@@ -145,118 +130,78 @@ function stopLive() {
     video.srcObject = null;
   }
 
-  rawDetections = [];
-  smoothedDetections = [];
+  boxes = [];
   ctx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
 
-/* ================= DETECTION SCHEDULER ================= */
-function scheduleDetection() {
+/* ================= DETECTION LOOP ================= */
+function detectLoop() {
   if (!running) return;
 
-  detectTimer = setTimeout(async () => {
-    await runDetection();
-    scheduleDetection();
-  }, detectIntervalMs);
-}
+  capCtx.drawImage(video, 0, 0, SIZE, SIZE);
 
-/* ================= DETECTION ================= */
-async function runDetection() {
-  if (!running || video.videoWidth === 0) return;
-
-  cctx.drawImage(video, 0, 0, SIZE, SIZE);
-
-  captureCanvas.toBlob(async blob => {
+  cap.toBlob(async blob => {
     if (!blob) return;
 
-    const formData = new FormData();
-    formData.append("image", blob, "frame.jpg");
+    const fd = new FormData();
+    fd.append("image", blob, "frame.jpg");
 
     try {
-      const res = await fetch(BACKEND_URL, { method: "POST", body: formData });
+      const res = await fetch(BACKEND_URL, { method: "POST", body: fd });
       const data = await res.json();
+      updateBoxes(data.detections);
+    } catch {}
 
-      rawDetections = data.detections.map(d => ({
-        ...d,
-        ttl: BOX_TTL
-      }));
-
-      /* ===== Adaptive FPS Stabilization ===== */
-      const rtt = data.timing.total_ms;
-      rttEma = rttEma === null ? rtt : RTT_ALPHA * rtt + (1 - RTT_ALPHA) * rttEma;
-
-      let targetInterval = Math.round(rttEma * 2.2);
-      targetInterval = Math.max(MIN_INTERVAL, Math.min(MAX_INTERVAL, targetInterval));
-
-      const delta = targetInterval - detectIntervalMs;
-      detectIntervalMs += Math.abs(delta) > MAX_STEP_CHANGE
-        ? Math.sign(delta) * MAX_STEP_CHANGE
-        : delta;
-
-      lastDetectTime = performance.now();
-
-    } catch {
-      // Silent failure: keep last detections
-    }
+    detectTimer = setTimeout(detectLoop, 400);
   }, "image/jpeg", 0.9);
 }
 
-/* ================= SMOOTHING ================= */
-function smoothDetections() {
-  const next = [];
+/* ================= UPDATE BOX TARGETS ================= */
+function updateBoxes(dets) {
+  const now = performance.now();
 
-  rawDetections.forEach((det, i) => {
-    const prev = smoothedDetections[i];
-
-    if (!prev) {
-      next.push({ ...det });
-    } else {
-      next.push({
-        ...det,
-        bbox: det.bbox.map((v, j) =>
-          BOX_ALPHA * v + (1 - BOX_ALPHA) * prev.bbox[j]
-        )
-      });
-    }
+  boxes = dets.map((d, i) => {
+    const prev = boxes[i]?.target || d.bbox;
+    return {
+      prev: prev,
+      target: d.bbox,
+      startTime: now,
+      confidence: d.confidence
+    };
   });
-
-  smoothedDetections = next;
-  rawDetections.forEach(d => d.ttl--);
-  rawDetections = rawDetections.filter(d => d.ttl > 0);
 }
 
-/* ================= RENDER LOOP ================= */
+/* ================= INTERPOLATION ================= */
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function interpBox(box) {
+  const t = Math.min((performance.now() - box.startTime) / INTERP_DURATION, 1);
+  return box.prev.map((v, i) => lerp(v, box.target[i], t));
+}
+
+/* ================= RENDER ================= */
 function renderLoop() {
   if (!running) return;
 
-  const now = performance.now();
-  const renderFps = 1000 / (now - lastRenderTime);
-  lastRenderTime = now;
-
-  smoothDetections();
-
   ctx.clearRect(0, 0, SIZE, SIZE);
+
   ctx.lineWidth = 2;
   ctx.font = "14px Arial";
-  ctx.strokeStyle = "red";
-  ctx.fillStyle = "red";
+  ctx.strokeStyle = "lime";
+  ctx.fillStyle = "lime";
 
-  smoothedDetections.forEach(det => {
-    const [x1, y1, x2, y2] = det.bbox;
+  boxes.forEach(box => {
+    const [x1, y1, x2, y2] = interpBox(box);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     ctx.fillText(
-      `Hen ${det.confidence.toFixed(2)}`,
+      `Hen ${box.confidence.toFixed(2)}`,
       x1,
       Math.max(15, y1 - 5)
     );
   });
-
-  statusText.innerText =
-    `Render FPS: ${renderFps.toFixed(1)} | ` +
-    `Detect Interval: ${Math.round(detectIntervalMs)} ms | ` +
-    `RTT EMA: ${Math.round(rttEma || 0)} ms | ` +
-    `Boxes: ${smoothedDetections.length}`;
 
   requestAnimationFrame(renderLoop);
 }

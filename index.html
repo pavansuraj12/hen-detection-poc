@@ -19,7 +19,6 @@
       margin-top: 20px;
     }
 
-    /* FIXED, SAFE VIEWPORT */
     .camera-box {
       position: relative;
       width: 416px;
@@ -77,10 +76,11 @@
   const ctx = canvas.getContext("2d");
   const statusText = document.getElementById("status");
 
-  // EXACT SAME SIZE AS YOLO
   const SIZE = 416;
-
   let intervalId = null;
+
+  let lastFrameTime = performance.now();
+  let fps = 0;
 
   async function startLive() {
     if (intervalId) return;
@@ -101,7 +101,7 @@
         canvas.height = SIZE;
 
         statusText.innerText = "Live detection";
-        intervalId = setInterval(sendFrame, 400); // stable
+        intervalId = setInterval(sendFrame, 400);
       };
 
     } catch (err) {
@@ -122,6 +122,7 @@
     ctx.clearRect(0, 0, SIZE, SIZE);
     statusText.innerText = "Stopped";
   }
+
   function sendFrame() {
     ctx.drawImage(video, 0, 0, SIZE, SIZE);
 
@@ -137,8 +138,17 @@
       })
       .then(res => res.json())
       .then(data => {
+        const now = performance.now();
+        fps = 1000 / (now - lastFrameTime);
+        lastFrameTime = now;
+
         drawBoxes(data.detections);
-        statusText.innerText = `Detections: ${data.count}`;
+
+        statusText.innerText =
+          `Detections: ${data.count} | ` +
+          `FPS: ${fps.toFixed(1)} | ` +
+          `Infer: ${data.timing.inference_ms} ms | ` +
+          `RTT: ${data.timing.total_ms} ms`;
       })
       .catch(() => {
         statusText.innerText = "Detection error";
@@ -148,6 +158,7 @@
   }
 
   function drawBoxes(dets) {
+    ctx.clearRect(0, 0, SIZE, SIZE);
     ctx.lineWidth = 2;
     ctx.font = "14px Arial";
     ctx.strokeStyle = "red";

@@ -1,46 +1,43 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Production)</title>
+  <title>YOLO Hen Detection — Production Grade</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
     body {
       margin: 0;
+      padding: 0;
       background: #111;
       color: white;
       font-family: Arial, sans-serif;
       text-align: center;
     }
 
-    h3 { margin-top: 12px; }
-
     .camera-box {
       position: relative;
       width: 416px;
       height: 416px;
-      margin: 10px auto;
-      border: 2px solid #333;
+      margin: 20px auto;
+      border: 2px solid #444;
     }
 
-    video, canvas {
-      position: absolute;
+    video {
       width: 416px;
       height: 416px;
+      display: block;
+    }
+
+    canvas {
+      position: absolute;
       top: 0;
       left: 0;
+      pointer-events: none;
     }
 
-    button {
-      padding: 10px 18px;
-      margin: 6px;
-      font-size: 14px;
-    }
-
-    #status {
-      margin-top: 8px;
+    .status {
       font-size: 13px;
-      opacity: 0.9;
+      margin-top: 8px;
     }
   </style>
 </head>
@@ -51,156 +48,228 @@
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
-  <canvas id="canvas"></canvas>
+  <canvas id="overlay"></canvas>
 </div>
 
-<button onclick="start()">Start</button>
-<button onclick="stop()">Stop</button>
+<button onclick="startLive()">Start</button>
+<button onclick="stopLive()">Stop</button>
 
-<div id="status">Idle</div>
+<div class="status" id="status">Idle</div>
 
 <script>
 /* ================= CONFIG ================= */
 const SIZE = 416;
-const SEND_INTERVAL = 350;      // ms (stable)
-const FADE_IN = 0.15;
-const FADE_OUT = 0.06;
-const SMOOTHING = 0.6;
-const MAX_MISSES = 10;
+const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
+const DETECT_INTERVAL = 400;
 
-/* =============== ELEMENTS ================= */
+/* Track validation thresholds */
+const TRACK_TTL = 6;
+const IOU_THRESHOLD = 0.3;
+const MIN_TRACK_AGE = 5;          // frames
+const MIN_AVG_CONF = 0.35;
+const MIN_BOX_AREA = 30 * 30;
+const MAX_BOX_AREA = 350 * 350;
+const PREDICTION_DAMPING = 0.9;
+
+/* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
+const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* =============== STATE ==================== */
-let timer = null;
-let tracks = {};
-let lastFrame = performance.now();
+/* HiDPI fix */
+const dpr = window.devicePixelRatio || 1;
+canvas.width = SIZE * dpr;
+canvas.height = SIZE * dpr;
+canvas.style.width = SIZE + "px";
+canvas.style.height = SIZE + "px";
+ctx.scale(dpr, dpr);
 
-/* =============== START ==================== */
-async function start() {
-  if (timer) return;
+/* Capture canvas */
+const cap = document.createElement("canvas");
+cap.width = SIZE;
+cap.height = SIZE;
+const capCtx = cap.getContext("2d");
+
+/* ================= STATE ================= */
+let running = false;
+let detectTimer = null;
+let tracks = [];
+let nextTrackId = 1;
+
+/* ================= START ================= */
+async function startLive() {
+  if (running) return;
 
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" } }
   });
 
   video.srcObject = stream;
+
   video.onloadedmetadata = () => {
-    canvas.width = SIZE;
-    canvas.height = SIZE;
-    timer = setInterval(sendFrame, SEND_INTERVAL);
-    statusText.innerText = "Live detection";
+    video.play();
+    running = true;
+    detectLoop();
+    requestAnimationFrame(renderLoop);
+    statusText.innerText = "Live";
   };
 }
 
-/* =============== STOP ===================== */
-function stop() {
-  clearInterval(timer);
-  timer = null;
-  ctx.clearRect(0,0,SIZE,SIZE);
-  tracks = {};
+/* ================= STOP ================= */
+function stopLive() {
+  running = false;
+  clearTimeout(detectTimer);
+
   if (video.srcObject) {
     video.srcObject.getTracks().forEach(t => t.stop());
     video.srcObject = null;
   }
+
+  tracks = [];
+  ctx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
 
-/* =============== SEND FRAME =============== */
-function sendFrame() {
-  ctx.drawImage(video, 0, 0, SIZE, SIZE);
+/* ================= DETECTION LOOP ================= */
+function detectLoop() {
+  if (!running) return;
 
-  canvas.toBlob(blob => {
+  capCtx.drawImage(video, 0, 0, SIZE, SIZE);
+
+  cap.toBlob(async blob => {
+    if (!blob) return;
+
     const fd = new FormData();
-    fd.append("image", blob);
+    fd.append("image", blob, "frame.jpg");
 
-    fetch("https://unraided-camren-streamingly.ngrok-free.dev/predict", {
-      method: "POST",
-      body: fd
-    })
-    .then(r => r.json())
-    .then(updateTracks)
-    .catch(() => statusText.innerText = "Network error");
+    try {
+      const res = await fetch(BACKEND_URL, { method: "POST", body: fd });
+      const data = await res.json();
+      updateTracks(data.detections);
+    } catch {}
+
+    detectTimer = setTimeout(detectLoop, DETECT_INTERVAL);
   }, "image/jpeg", 0.9);
 }
 
-/* =============== TRACK UPDATE ============= */
-function updateTracks(data) {
-  const now = performance.now();
-  const dt = (now - lastFrame) / 1000;
-  lastFrame = now;
+/* ================= IOU ================= */
+function iou(a, b) {
+  const xA = Math.max(a[0], b[0]);
+  const yA = Math.max(a[1], b[1]);
+  const xB = Math.min(a[2], b[2]);
+  const yB = Math.min(a[3], b[3]);
 
-  const seen = new Set();
+  const inter = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+  const areaA = (a[2] - a[0]) * (a[3] - a[1]);
+  const areaB = (b[2] - b[0]) * (b[3] - b[1]);
 
-  data.detections.forEach(det => {
-    const id = det.id ?? det.class; // fallback safe
-    const [x1,y1,x2,y2] = det.bbox;
-    const cx = (x1+x2)/2, cy=(y1+y2)/2;
-    const w = x2-x1, h=y2-y1;
-
-    if (!tracks[id]) {
-      tracks[id] = {
-        x: cx, y: cy, w, h,
-        vx: 0, vy: 0,
-        alpha: 0,
-        misses: 0
-      };
-    }
-
-    const t = tracks[id];
-
-    t.vx = (cx - t.x) / dt;
-    t.vy = (cy - t.y) / dt;
-
-    t.x += (cx - t.x) * SMOOTHING;
-    t.y += (cy - t.y) * SMOOTHING;
-    t.w += (w - t.w) * SMOOTHING;
-    t.h += (h - t.h) * SMOOTHING;
-
-    t.alpha = Math.min(1, t.alpha + FADE_IN);
-    t.misses = 0;
-
-    seen.add(id);
-  });
-
-  Object.keys(tracks).forEach(id => {
-    const t = tracks[id];
-    if (!seen.has(id)) {
-      t.x += t.vx * dt;
-      t.y += t.vy * dt;
-      t.alpha -= FADE_OUT;
-      t.misses++;
-      if (t.misses > MAX_MISSES || t.alpha <= 0) {
-        delete tracks[id];
-      }
-    }
-  });
-
-  draw();
+  return inter / (areaA + areaB - inter + 1e-6);
 }
 
-/* =============== DRAW ===================== */
-function draw() {
-  ctx.clearRect(0,0,SIZE,SIZE);
+/* ================= TRACK UPDATE ================= */
+function updateTracks(detections) {
+  const now = performance.now();
+  tracks.forEach(t => t.ttl--);
 
-  Object.values(tracks).forEach(t => {
-    ctx.globalAlpha = t.alpha;
-    ctx.strokeStyle = "#00ff00";
+  const used = new Set();
+
+  detections.forEach(det => {
+    let best = null, bestIou = 0;
+
+    tracks.forEach(t => {
+      if (used.has(t.id)) return;
+      const score = iou(t.bbox, det.bbox);
+      if (score > bestIou) {
+        bestIou = score;
+        best = t;
+      }
+    });
+
+    if (best && bestIou > IOU_THRESHOLD) {
+      const dt = (now - best.lastUpdateTime) / 1000;
+      if (dt > 0) {
+        best.velocity = best.bbox.map(
+          (v, i) => (det.bbox[i] - v) / dt
+        );
+      }
+
+      best.bbox = det.bbox;
+      best.confHistory.push(det.confidence);
+      if (best.confHistory.length > 10) best.confHistory.shift();
+      best.lastUpdateTime = now;
+      best.ttl = TRACK_TTL;
+      used.add(best.id);
+    } else {
+      tracks.push({
+        id: nextTrackId++,
+        bbox: det.bbox,
+        velocity: [0, 0, 0, 0],
+        lastUpdateTime: now,
+        confHistory: [det.confidence],
+        ttl: TRACK_TTL,
+        age: 0
+      });
+    }
+  });
+
+  tracks = tracks.filter(t => t.ttl > 0);
+}
+
+/* ================= RENDER ================= */
+function renderLoop() {
+  if (!running) return;
+
+  const now = performance.now();
+  ctx.clearRect(0, 0, SIZE, SIZE);
+
+  let validCount = 0;
+
+  tracks.forEach(t => {
+    t.age++;
+
+    const avgConf =
+      t.confHistory.reduce((a, b) => a + b, 0) / t.confHistory.length;
+
+    const area =
+      (t.bbox[2] - t.bbox[0]) * (t.bbox[3] - t.bbox[1]);
+
+    if (
+      t.age < MIN_TRACK_AGE ||
+      avgConf < MIN_AVG_CONF ||
+      area < MIN_BOX_AREA ||
+      area > MAX_BOX_AREA
+    ) {
+      return;
+    }
+
+    validCount++;
+
+    const dt = (now - t.lastUpdateTime) / 1000;
+    const pred = t.bbox.map(
+      (v, i) => v + t.velocity[i] * dt * PREDICTION_DAMPING
+    );
+
+    ctx.strokeStyle = "lime";
     ctx.lineWidth = 2;
-
     ctx.strokeRect(
-      t.x - t.w/2,
-      t.y - t.h/2,
-      t.w,
-      t.h
+      pred[0],
+      pred[1],
+      pred[2] - pred[0],
+      pred[3] - pred[1]
+    );
+
+    ctx.fillStyle = "lime";
+    ctx.font = "14px Arial";
+    ctx.fillText(
+      `Hen ${t.id}`,
+      pred[0],
+      Math.max(15, pred[1] - 5)
     );
   });
 
-  ctx.globalAlpha = 1.0;
-  statusText.innerText = `Active tracks: ${Object.keys(tracks).length}`;
+  statusText.innerText = `Active hens: ${validCount}`;
+  requestAnimationFrame(renderLoop);
 }
 </script>
 

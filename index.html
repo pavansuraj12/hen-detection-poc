@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Interpolated)</title>
+  <title>YOLO Hen Detection (Geometry-Correct)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -32,19 +32,27 @@
       position: absolute;
       top: 0;
       left: 0;
+      width: 416px;
+      height: 416px;
       pointer-events: none;
     }
 
+    button {
+      padding: 10px 16px;
+      margin: 6px;
+      font-size: 14px;
+    }
+
     .status {
-      font-size: 13px;
-      margin-top: 8px;
+      margin-top: 10px;
+      font-size: 14px;
     }
   </style>
 </head>
 
 <body>
 
-<h3>YOLO Hen Detection (Smooth Motion)</h3>
+<h3>YOLO Hen Detection (Geometry-Correct)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -57,48 +65,26 @@
 <div class="status" id="status">Idle</div>
 
 <script>
-/* ================= CONFIG ================= */
+/* ================== CONFIG ================== */
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
-const INTERP_DURATION = 300; // ms
 
-/* ================= ELEMENTS ================= */
+/* ================== ELEMENTS ================== */
 const video = document.getElementById("video");
 const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* DPR fix */
-const dpr = window.devicePixelRatio || 1;
-canvas.width = SIZE * dpr;
-canvas.height = SIZE * dpr;
-canvas.style.width = SIZE + "px";
-canvas.style.height = SIZE + "px";
-ctx.scale(dpr, dpr);
+canvas.width = SIZE;
+canvas.height = SIZE;
 
-/* Capture canvas */
-const cap = document.createElement("canvas");
-cap.width = SIZE;
-cap.height = SIZE;
-const capCtx = cap.getContext("2d");
-
-/* ================= STATE ================= */
+/* ================== STATE ================== */
 let running = false;
-let detectTimer = null;
+let detectInterval = null;
+let latestDetections = [];
+let lastFrameTime = performance.now();
 
-let boxes = []; // active boxes
-
-/* ================= BOX STRUCTURE ================= */
-/*
-{
-  prev: [x1,y1,x2,y2],
-  target: [x1,y1,x2,y2],
-  startTime: timestamp,
-  confidence: number
-}
-*/
-
-/* ================= START ================= */
+/* ================== START ================== */
 async function startLive() {
   if (running) return;
 
@@ -107,82 +93,69 @@ async function startLive() {
   });
 
   video.srcObject = stream;
+  running = true;
 
-  video.onloadedmetadata = () => {
-    video.play();
-    running = true;
+  detectInterval = setInterval(sendFrameForDetection, 400);
+  requestAnimationFrame(renderLoop);
 
-    detectLoop();
-    requestAnimationFrame(renderLoop);
-
-    statusText.innerText = "Live";
-  };
+  statusText.innerText = "Live detection";
 }
 
-/* ================= STOP ================= */
+/* ================== STOP ================== */
 function stopLive() {
   running = false;
-  clearTimeout(detectTimer);
-  detectTimer = null;
+  clearInterval(detectInterval);
+  detectInterval = null;
 
   if (video.srcObject) {
     video.srcObject.getTracks().forEach(t => t.stop());
     video.srcObject = null;
   }
 
-  boxes = [];
+  latestDetections = [];
   ctx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
 
-/* ================= DETECTION LOOP ================= */
-function detectLoop() {
+/* ================== DETECTION LOOP ================== */
+function sendFrameForDetection() {
   if (!running) return;
 
-  capCtx.drawImage(video, 0, 0, SIZE, SIZE);
+  const offscreen = document.createElement("canvas");
+  offscreen.width = SIZE;
+  offscreen.height = SIZE;
+  offscreen.getContext("2d").drawImage(video, 0, 0, SIZE, SIZE);
 
-  cap.toBlob(async blob => {
-    if (!blob) return;
+  offscreen.toBlob(blob => {
+    const formData = new FormData();
+    formData.append("image", blob, "frame.jpg");
 
-    const fd = new FormData();
-    fd.append("image", blob, "frame.jpg");
+    fetch(BACKEND_URL, {
+      method: "POST",
+      body: formData
+    })
+    .then(res => res.json())
+    .then(data => {
+      latestDetections = data.detections;
 
-    try {
-      const res = await fetch(BACKEND_URL, { method: "POST", body: fd });
-      const data = await res.json();
-      updateBoxes(data.detections);
-    } catch {}
+      const now = performance.now();
+      const fps = 1000 / (now - lastFrameTime);
+      lastFrameTime = now;
 
-    detectTimer = setTimeout(detectLoop, 400);
+      statusText.innerText =
+        `Detections: ${data.count} | ` +
+        `FPS: ${fps.toFixed(1)} | ` +
+        `Infer: ${data.timing.inference_ms} ms | ` +
+        `RTT: ${data.timing.total_ms} ms`;
+    })
+    .catch(() => {
+      statusText.innerText = "Detection error";
+    });
+
   }, "image/jpeg", 0.9);
 }
 
-/* ================= UPDATE BOX TARGETS ================= */
-function updateBoxes(dets) {
-  const now = performance.now();
-
-  boxes = dets.map((d, i) => {
-    const prev = boxes[i]?.target || d.bbox;
-    return {
-      prev: prev,
-      target: d.bbox,
-      startTime: now,
-      confidence: d.confidence
-    };
-  });
-}
-
-/* ================= INTERPOLATION ================= */
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-function interpBox(box) {
-  const t = Math.min((performance.now() - box.startTime) / INTERP_DURATION, 1);
-  return box.prev.map((v, i) => lerp(v, box.target[i], t));
-}
-
-/* ================= RENDER ================= */
+/* ================== RENDER LOOP (NO BLINK) ================== */
 function renderLoop() {
   if (!running) return;
 
@@ -190,14 +163,14 @@ function renderLoop() {
 
   ctx.lineWidth = 2;
   ctx.font = "14px Arial";
-  ctx.strokeStyle = "lime";
-  ctx.fillStyle = "lime";
+  ctx.strokeStyle = "red";
+  ctx.fillStyle = "red";
 
-  boxes.forEach(box => {
-    const [x1, y1, x2, y2] = interpBox(box);
+  latestDetections.forEach(det => {
+    const [x1, y1, x2, y2] = det.bbox;
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     ctx.fillText(
-      `Hen ${box.confidence.toFixed(2)}`,
+      `Hen ${det.confidence.toFixed(2)}`,
       x1,
       Math.max(15, y1 - 5)
     );

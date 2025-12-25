@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection — Production Grade</title>
+  <title>YOLO Hen Detection — Production Tracking</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -44,7 +44,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (Production-Grade)</h3>
+<h3>YOLO Hen Detection (Production-Grade Tracking)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -61,15 +61,9 @@
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
 const DETECT_INTERVAL = 400;
-
-/* Track validation thresholds */
 const TRACK_TTL = 6;
 const IOU_THRESHOLD = 0.3;
-const MIN_TRACK_AGE = 5;          // frames
-const MIN_AVG_CONF = 0.35;
-const MIN_BOX_AREA = 30 * 30;
-const MAX_BOX_AREA = 350 * 350;
-const PREDICTION_DAMPING = 0.9;
+const PREDICTION_DAMPING = 0.9; // smooth motion
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
@@ -77,7 +71,7 @@ const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* HiDPI fix */
+/* DPR fix */
 const dpr = window.devicePixelRatio || 1;
 canvas.width = SIZE * dpr;
 canvas.height = SIZE * dpr;
@@ -167,46 +161,51 @@ function iou(a, b) {
   return inter / (areaA + areaB - inter + 1e-6);
 }
 
-/* ================= TRACK UPDATE ================= */
+/* ================= TRACK UPDATE + VELOCITY ================= */
 function updateTracks(detections) {
   const now = performance.now();
+
+  // Decay TTL
   tracks.forEach(t => t.ttl--);
 
-  const used = new Set();
+  const usedTracks = new Set();
 
   detections.forEach(det => {
-    let best = null, bestIou = 0;
+    let bestMatch = null;
+    let bestIou = 0;
 
-    tracks.forEach(t => {
-      if (used.has(t.id)) return;
-      const score = iou(t.bbox, det.bbox);
+    tracks.forEach(track => {
+      if (usedTracks.has(track.id)) return;
+      const score = iou(track.bbox, det.bbox);
       if (score > bestIou) {
         bestIou = score;
-        best = t;
+        bestMatch = track;
       }
     });
 
-    if (best && bestIou > IOU_THRESHOLD) {
-      const dt = (now - best.lastUpdateTime) / 1000;
+    if (bestMatch && bestIou > IOU_THRESHOLD) {
+      const dt = (now - bestMatch.lastUpdateTime) / 1000;
+
+      // Estimate velocity
       if (dt > 0) {
-        best.velocity = best.bbox.map(
+        bestMatch.velocity = bestMatch.bbox.map(
           (v, i) => (det.bbox[i] - v) / dt
         );
       }
 
-      best.bbox = det.bbox;
-      best.confHistory.push(det.confidence);
-      if (best.confHistory.length > 10) best.confHistory.shift();
-      best.lastUpdateTime = now;
-      best.ttl = TRACK_TTL;
-      used.add(best.id);
+      bestMatch.bbox = det.bbox;
+      bestMatch.lastUpdateTime = now;
+      bestMatch.confidence = det.confidence;
+      bestMatch.ttl = TRACK_TTL;
+      usedTracks.add(bestMatch.id);
     } else {
+      // New track
       tracks.push({
         id: nextTrackId++,
         bbox: det.bbox,
         velocity: [0, 0, 0, 0],
         lastUpdateTime: now,
-        confHistory: [det.confidence],
+        confidence: det.confidence,
         ttl: TRACK_TTL,
         age: 0
       });
@@ -216,59 +215,43 @@ function updateTracks(detections) {
   tracks = tracks.filter(t => t.ttl > 0);
 }
 
-/* ================= RENDER ================= */
+/* ================= RENDER + PREDICTION ================= */
 function renderLoop() {
   if (!running) return;
 
   const now = performance.now();
-  ctx.clearRect(0, 0, SIZE, SIZE);
 
-  let validCount = 0;
+  ctx.clearRect(0, 0, SIZE, SIZE);
+  ctx.lineWidth = 2;
+  ctx.font = "14px Arial";
+  ctx.strokeStyle = "lime";
+  ctx.fillStyle = "lime";
 
   tracks.forEach(t => {
-    t.age++;
-
-    const avgConf =
-      t.confHistory.reduce((a, b) => a + b, 0) / t.confHistory.length;
-
-    const area =
-      (t.bbox[2] - t.bbox[0]) * (t.bbox[3] - t.bbox[1]);
-
-    if (
-      t.age < MIN_TRACK_AGE ||
-      avgConf < MIN_AVG_CONF ||
-      area < MIN_BOX_AREA ||
-      area > MAX_BOX_AREA
-    ) {
-      return;
-    }
-
-    validCount++;
-
     const dt = (now - t.lastUpdateTime) / 1000;
-    const pred = t.bbox.map(
+
+    // Predict next position
+    const predicted = t.bbox.map(
       (v, i) => v + t.velocity[i] * dt * PREDICTION_DAMPING
     );
 
-    ctx.strokeStyle = "lime";
-    ctx.lineWidth = 2;
     ctx.strokeRect(
-      pred[0],
-      pred[1],
-      pred[2] - pred[0],
-      pred[3] - pred[1]
+      predicted[0],
+      predicted[1],
+      predicted[2] - predicted[0],
+      predicted[3] - predicted[1]
     );
 
-    ctx.fillStyle = "lime";
-    ctx.font = "14px Arial";
     ctx.fillText(
       `Hen ${t.id}`,
-      pred[0],
-      Math.max(15, pred[1] - 5)
+      predicted[0],
+      Math.max(15, predicted[1] - 5)
     );
+
+    t.age++;
   });
 
-  statusText.innerText = `Active hens: ${validCount}`;
+  statusText.innerText = `Active tracks: ${tracks.length}`;
   requestAnimationFrame(renderLoop);
 }
 </script>

@@ -1,127 +1,113 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Hen Detection – CCTV Style</title>
+  <title>Hen Detection – CCTV</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
     body {
-      margin: 0;
-      padding: 0;
       background: #111;
       color: white;
       font-family: Arial, sans-serif;
       text-align: center;
+      margin: 0;
+      padding: 10px;
     }
-
-    h3 {
-      margin-top: 12px;
-    }
-
     .camera-box {
       position: relative;
       width: 416px;
       height: 416px;
-      margin: 12px auto;
+      margin: auto;
       border: 2px solid #444;
     }
-
     video, canvas {
       position: absolute;
-      top: 0;
-      left: 0;
       width: 416px;
       height: 416px;
+      top: 0;
+      left: 0;
     }
-
     button {
-      padding: 10px 18px;
       margin: 6px;
-      font-size: 14px;
+      padding: 10px 16px;
     }
-
     #status {
-      margin-top: 8px;
-      font-size: 13px;
-      opacity: 0.9;
+      margin-top: 10px;
+      font-size: 14px;
     }
   </style>
 </head>
 
 <body>
 
-<h3>Hen Detection (CCTV Style)</h3>
+<h3>Hen Detection (CCTV Debug)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
   <canvas id="canvas"></canvas>
 </div>
 
-<button onclick="startLive()">Start</button>
-<button onclick="stopLive()">Stop</button>
+<button id="startBtn">Start</button>
+<button id="stopBtn">Stop</button>
 
-<div id="status">Idle</div>
+<div id="status">Page loaded</div>
 
 <script>
-/* ================= CONFIG ================= */
-const SIZE = 416;
-const SEND_INTERVAL = 300;      // ms
-const HOLD_TIME = 800;          // ms (prevents flicker)
+console.log("JS loaded");
 
-/* =============== ELEMENTS ================= */
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* =============== STATE ==================== */
-let intervalId = null;
+const SIZE = 416;
+const SEND_INTERVAL = 300;
+const HOLD_TIME = 800;
+
+let timer = null;
 let lastDetections = [];
-let lastUpdateTime = performance.now();
+let lastUpdate = performance.now();
 
-/* =============== START ==================== */
+document.getElementById("startBtn").onclick = startLive;
+document.getElementById("stopBtn").onclick = stopLive;
+
 async function startLive() {
-  if (intervalId) return;
+  try {
+    statusText.innerText = "Requesting camera...";
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } }
+    });
+    video.srcObject = stream;
 
-  statusText.innerText = "Starting camera...";
-
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: "environment" } }
-  });
-
-  video.srcObject = stream;
-
-  video.onloadedmetadata = () => {
-    video.width = SIZE;
-    video.height = SIZE;
-    canvas.width = SIZE;
-    canvas.height = SIZE;
-
-    intervalId = setInterval(sendFrame, SEND_INTERVAL);
-    statusText.innerText = "Live";
-  };
+    video.onloadedmetadata = () => {
+      canvas.width = SIZE;
+      canvas.height = SIZE;
+      timer = setInterval(sendFrame, SEND_INTERVAL);
+      statusText.innerText = "Live";
+    };
+  } catch (e) {
+    console.error(e);
+    statusText.innerText = "Camera error: " + e.message;
+  }
 }
 
-/* =============== STOP ===================== */
 function stopLive() {
-  clearInterval(intervalId);
-  intervalId = null;
-
+  clearInterval(timer);
+  timer = null;
   if (video.srcObject) {
     video.srcObject.getTracks().forEach(t => t.stop());
     video.srcObject = null;
   }
-
-  ctx.clearRect(0, 0, SIZE, SIZE);
+  ctx.clearRect(0,0,SIZE,SIZE);
   lastDetections = [];
   statusText.innerText = "Stopped";
 }
 
-/* =============== SEND FRAME =============== */
 function sendFrame() {
   ctx.drawImage(video, 0, 0, SIZE, SIZE);
-
   canvas.toBlob(blob => {
+    if (!blob) return;
+
     const fd = new FormData();
     fd.append("image", blob);
 
@@ -129,27 +115,24 @@ function sendFrame() {
       method: "POST",
       body: fd
     })
-    .then(res => res.json())
+    .then(r => r.json())
     .then(data => {
-      if (data.detections && data.detections.length > 0) {
+      if (Array.isArray(data.detections)) {
         lastDetections = data.detections;
-        lastUpdateTime = performance.now();
+        lastUpdate = performance.now();
       }
       draw();
     })
-    .catch(() => {
-      draw(); // draw last known boxes
+    .catch(err => {
+      console.error(err);
+      draw();
     });
-
   }, "image/jpeg", 0.9);
 }
 
-/* =============== DRAW ===================== */
 function draw() {
-  ctx.clearRect(0, 0, SIZE, SIZE);
-
-  const now = performance.now();
-  if (now - lastUpdateTime > HOLD_TIME) {
+  ctx.clearRect(0,0,SIZE,SIZE);
+  if (performance.now() - lastUpdate > HOLD_TIME) {
     lastDetections = [];
   }
 
@@ -158,10 +141,11 @@ function draw() {
   ctx.font = "14px Arial";
   ctx.fillStyle = "lime";
 
-  lastDetections.forEach(det => {
-    const [x1, y1, x2, y2] = det.bbox;
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.fillText(`ID ${det.id}`, x1, y1 - 5);
+  lastDetections.forEach(d => {
+    if (!d.bbox) return;
+    const [x1,y1,x2,y2] = d.bbox;
+    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+    ctx.fillText(`ID ${d.id}`, x1, y1-5);
   });
 
   statusText.innerText = `Count: ${lastDetections.length}`;

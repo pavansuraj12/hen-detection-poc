@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Geometry-Correct)</title>
+  <title>YOLO Hen Detection (Stable)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -52,7 +52,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (Geometry-Correct)</h3>
+<h3>YOLO Hen Detection (Stable)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -71,16 +71,22 @@ const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict"
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
-const canvas = document.getElementById("overlay");
-const ctx = canvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const octx = overlay.getContext("2d");
 const statusText = document.getElementById("status");
 
-canvas.width = SIZE;
-canvas.height = SIZE;
+/* ✅ ONE reusable capture canvas */
+const captureCanvas = document.createElement("canvas");
+captureCanvas.width = SIZE;
+captureCanvas.height = SIZE;
+const cctx = captureCanvas.getContext("2d");
+
+overlay.width = SIZE;
+overlay.height = SIZE;
 
 /* ================= STATE ================= */
 let running = false;
-let detectInterval = null;
+let detectTimer = null;
 let latestDetections = [];
 let lastFrameTime = performance.now();
 
@@ -96,12 +102,11 @@ async function startLive() {
 
   video.srcObject = stream;
 
-  // ✅ WAIT until video is actually ready
   video.onloadedmetadata = () => {
     video.play();
-
     running = true;
-    detectInterval = setInterval(sendFrameForDetection, 400);
+
+    detectTimer = setInterval(runDetection, 400);
     requestAnimationFrame(renderLoop);
 
     statusText.innerText = "Live detection";
@@ -111,8 +116,8 @@ async function startLive() {
 /* ================= STOP ================= */
 function stopLive() {
   running = false;
-  clearInterval(detectInterval);
-  detectInterval = null;
+  clearInterval(detectTimer);
+  detectTimer = null;
 
   if (video.srcObject) {
     video.srcObject.getTracks().forEach(t => t.stop());
@@ -120,20 +125,17 @@ function stopLive() {
   }
 
   latestDetections = [];
-  ctx.clearRect(0, 0, SIZE, SIZE);
+  octx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
 
-/* ================= DETECTION LOOP ================= */
-function sendFrameForDetection() {
+/* ================= DETECTION ================= */
+function runDetection() {
   if (!running || video.videoWidth === 0) return;
 
-  const offscreen = document.createElement("canvas");
-  offscreen.width = SIZE;
-  offscreen.height = SIZE;
-  offscreen.getContext("2d").drawImage(video, 0, 0, SIZE, SIZE);
+  cctx.drawImage(video, 0, 0, SIZE, SIZE);
 
-  offscreen.toBlob(blob => {
+  captureCanvas.toBlob(blob => {
     const formData = new FormData();
     formData.append("image", blob, "frame.jpg");
 
@@ -141,7 +143,7 @@ function sendFrameForDetection() {
       method: "POST",
       body: formData
     })
-    .then(res => res.json())
+    .then(r => r.json())
     .then(data => {
       latestDetections = data.detections;
 
@@ -162,21 +164,21 @@ function sendFrameForDetection() {
   }, "image/jpeg", 0.9);
 }
 
-/* ================= RENDER LOOP ================= */
+/* ================= RENDER ================= */
 function renderLoop() {
   if (!running) return;
 
-  ctx.clearRect(0, 0, SIZE, SIZE);
+  octx.clearRect(0, 0, SIZE, SIZE);
 
-  ctx.lineWidth = 2;
-  ctx.font = "14px Arial";
-  ctx.strokeStyle = "red";
-  ctx.fillStyle = "red";
+  octx.lineWidth = 2;
+  octx.font = "14px Arial";
+  octx.strokeStyle = "red";
+  octx.fillStyle = "red";
 
   latestDetections.forEach(det => {
     const [x1, y1, x2, y2] = det.bbox;
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.fillText(
+    octx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    octx.fillText(
       `Hen ${det.confidence.toFixed(2)}`,
       x1,
       Math.max(15, y1 - 5)

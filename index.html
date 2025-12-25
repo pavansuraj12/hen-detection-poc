@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection — Persistent Tracks</title>
+  <title>YOLO Hen Detection — IoU Tracking</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -44,7 +44,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (Persistent Tracks)</h3>
+<h3>YOLO Hen Detection (IoU-Based Tracking)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -61,7 +61,8 @@
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
 const DETECT_INTERVAL = 400;
-const TRACK_TTL = 6; // frames
+const TRACK_TTL = 6;
+const IOU_THRESHOLD = 0.3;
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
@@ -86,7 +87,6 @@ const capCtx = cap.getContext("2d");
 /* ================= STATE ================= */
 let running = false;
 let detectTimer = null;
-
 let tracks = [];
 let nextTrackId = 1;
 
@@ -113,7 +113,6 @@ async function startLive() {
 function stopLive() {
   running = false;
   clearTimeout(detectTimer);
-  detectTimer = null;
 
   if (video.srcObject) {
     video.srcObject.getTracks().forEach(t => t.stop());
@@ -147,20 +146,56 @@ function detectLoop() {
   }, "image/jpeg", 0.9);
 }
 
-/* ================= TRACK UPDATE (STEP 1) ================= */
+/* ================= IOU ================= */
+function iou(a, b) {
+  const xA = Math.max(a[0], b[0]);
+  const yA = Math.max(a[1], b[1]);
+  const xB = Math.min(a[2], b[2]);
+  const yB = Math.min(a[3], b[3]);
+
+  const inter = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+  const areaA = (a[2] - a[0]) * (a[3] - a[1]);
+  const areaB = (b[2] - b[0]) * (b[3] - b[1]);
+
+  return inter / (areaA + areaB - inter + 1e-6);
+}
+
+/* ================= TRACK UPDATE ================= */
 function updateTracks(detections) {
-  // Decrease TTL for all existing tracks
+  // Decay all tracks
   tracks.forEach(t => t.ttl--);
 
-  // Create new tracks for each detection
+  const usedTracks = new Set();
+
   detections.forEach(det => {
-    tracks.push({
-      id: nextTrackId++,
-      bbox: det.bbox,
-      confidence: det.confidence,
-      ttl: TRACK_TTL,
-      age: 0
+    let bestMatch = null;
+    let bestIou = 0;
+
+    tracks.forEach(track => {
+      if (usedTracks.has(track.id)) return;
+      const score = iou(track.bbox, det.bbox);
+      if (score > bestIou) {
+        bestIou = score;
+        bestMatch = track;
+      }
     });
+
+    if (bestMatch && bestIou > IOU_THRESHOLD) {
+      // Update existing track
+      bestMatch.bbox = det.bbox;
+      bestMatch.confidence = det.confidence;
+      bestMatch.ttl = TRACK_TTL;
+      usedTracks.add(bestMatch.id);
+    } else {
+      // Create new track
+      tracks.push({
+        id: nextTrackId++,
+        bbox: det.bbox,
+        confidence: det.confidence,
+        ttl: TRACK_TTL,
+        age: 0
+      });
+    }
   });
 
   // Remove expired tracks

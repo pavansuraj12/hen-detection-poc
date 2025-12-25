@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Stable & Accurate)</title>
+  <title>YOLO Hen Detection (Adaptive FPS)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -50,7 +50,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (Stable & Geometry-Correct)</h3>
+<h3>YOLO Hen Detection (Adaptive FPS)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -73,16 +73,15 @@ const overlay = document.getElementById("overlay");
 const octx = overlay.getContext("2d");
 const statusText = document.getElementById("status");
 
-/* ================= DPR FIX (IMPORTANT) ================= */
+/* ================= DPR FIX ================= */
 const dpr = window.devicePixelRatio || 1;
-
 overlay.width = SIZE * dpr;
 overlay.height = SIZE * dpr;
 overlay.style.width = SIZE + "px";
 overlay.style.height = SIZE + "px";
 octx.scale(dpr, dpr);
 
-/* ================= REUSABLE CAPTURE CANVAS ================= */
+/* ================= CAPTURE CANVAS ================= */
 const captureCanvas = document.createElement("canvas");
 captureCanvas.width = SIZE;
 captureCanvas.height = SIZE;
@@ -93,6 +92,9 @@ let running = false;
 let detectTimer = null;
 let latestDetections = [];
 let lastFrameTime = performance.now();
+
+/* 🔥 Adaptive FPS state */
+let detectIntervalMs = 400; // start safe
 
 /* ================= START ================= */
 async function startLive() {
@@ -110,7 +112,7 @@ async function startLive() {
     video.play();
     running = true;
 
-    detectTimer = setInterval(runDetection, 400);
+    scheduleDetection();
     requestAnimationFrame(renderLoop);
 
     statusText.innerText = "Live detection";
@@ -120,7 +122,7 @@ async function startLive() {
 /* ================= STOP ================= */
 function stopLive() {
   running = false;
-  clearInterval(detectTimer);
+  clearTimeout(detectTimer);
   detectTimer = null;
 
   if (video.srcObject) {
@@ -133,40 +135,55 @@ function stopLive() {
   statusText.innerText = "Stopped";
 }
 
-/* ================= DETECTION LOOP ================= */
-function runDetection() {
+/* ================= ADAPTIVE DETECTION ================= */
+function scheduleDetection() {
+  if (!running) return;
+
+  detectTimer = setTimeout(async () => {
+    await runDetection();
+    scheduleDetection(); // reschedule with updated interval
+  }, detectIntervalMs);
+}
+
+async function runDetection() {
   if (!running || video.videoWidth === 0) return;
 
   cctx.drawImage(video, 0, 0, SIZE, SIZE);
 
-  captureCanvas.toBlob(blob => {
-    if (!blob) return; // ✅ SAFETY GUARD
+  captureCanvas.toBlob(async blob => {
+    if (!blob) return;
 
     const formData = new FormData();
     formData.append("image", blob, "frame.jpg");
 
-    fetch(BACKEND_URL, {
-      method: "POST",
-      body: formData
-    })
-    .then(r => r.json())
-    .then(data => {
+    try {
+      const start = performance.now();
+      const res = await fetch(BACKEND_URL, { method: "POST", body: formData });
+      const data = await res.json();
+      const end = performance.now();
+
       latestDetections = data.detections;
 
-      const now = performance.now();
-      const fps = 1000 / (now - lastFrameTime);
-      lastFrameTime = now;
+      /* 🔥 ADAPTIVE FPS LOGIC */
+      const rtt = data.timing.total_ms;
+
+      if (rtt < 150) detectIntervalMs = 250;
+      else if (rtt < 250) detectIntervalMs = 400;
+      else detectIntervalMs = 700;
+
+      const fps = 1000 / (end - lastFrameTime);
+      lastFrameTime = end;
 
       statusText.innerText =
         `Detections: ${data.count} | ` +
         `FPS: ${fps.toFixed(1)} | ` +
         `Infer: ${data.timing.inference_ms} ms | ` +
-        `RTT: ${data.timing.total_ms} ms`;
-    })
-    .catch(() => {
-      statusText.innerText = "Detection error";
-    });
+        `RTT: ${rtt} ms | ` +
+        `Interval: ${detectIntervalMs} ms`;
 
+    } catch {
+      statusText.innerText = "Detection error";
+    }
   }, "image/jpeg", 0.9);
 }
 

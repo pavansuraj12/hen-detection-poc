@@ -1,16 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Hen Detection – CCTV Style</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #111;
+      color: white;
+      font-family: Arial, sans-serif;
+      text-align: center;
+    }
+
+    h3 {
+      margin-top: 12px;
+    }
+
+    .camera-box {
+      position: relative;
+      width: 416px;
+      height: 416px;
+      margin: 12px auto;
+      border: 2px solid #444;
+    }
+
+    video, canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 416px;
+      height: 416px;
+    }
+
+    button {
+      padding: 10px 18px;
+      margin: 6px;
+      font-size: 14px;
+    }
+
+    #status {
+      margin-top: 8px;
+      font-size: 13px;
+      opacity: 0.9;
+    }
+  </style>
+</head>
+
+<body>
+
+<h3>Hen Detection (CCTV Style)</h3>
+
+<div class="camera-box">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<button onclick="startLive()">Start</button>
+<button onclick="stopLive()">Stop</button>
+
+<div id="status">Idle</div>
+
 <script>
+/* ================= CONFIG ================= */
+const SIZE = 416;
+const SEND_INTERVAL = 300;      // ms
+const HOLD_TIME = 800;          // ms (prevents flicker)
+
+/* =============== ELEMENTS ================= */
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status");
 
-const SIZE = 416;
+/* =============== STATE ==================== */
 let intervalId = null;
+let lastDetections = [];
+let lastUpdateTime = performance.now();
 
+/* =============== START ==================== */
 async function startLive() {
+  if (intervalId) return;
+
+  statusText.innerText = "Starting camera...";
+
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" } }
   });
+
   video.srcObject = stream;
 
   video.onloadedmetadata = () => {
@@ -18,19 +96,31 @@ async function startLive() {
     video.height = SIZE;
     canvas.width = SIZE;
     canvas.height = SIZE;
-    intervalId = setInterval(sendFrame, 300);
+
+    intervalId = setInterval(sendFrame, SEND_INTERVAL);
     statusText.innerText = "Live";
   };
 }
 
+/* =============== STOP ===================== */
 function stopLive() {
   clearInterval(intervalId);
   intervalId = null;
-  ctx.clearRect(0,0,SIZE,SIZE);
+
+  if (video.srcObject) {
+    video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+  }
+
+  ctx.clearRect(0, 0, SIZE, SIZE);
+  lastDetections = [];
+  statusText.innerText = "Stopped";
 }
 
+/* =============== SEND FRAME =============== */
 function sendFrame() {
   ctx.drawImage(video, 0, 0, SIZE, SIZE);
+
   canvas.toBlob(blob => {
     const fd = new FormData();
     fd.append("image", blob);
@@ -39,24 +129,44 @@ function sendFrame() {
       method: "POST",
       body: fd
     })
-    .then(r => r.json())
-    .then(data => draw(data.detections));
+    .then(res => res.json())
+    .then(data => {
+      if (data.detections && data.detections.length > 0) {
+        lastDetections = data.detections;
+        lastUpdateTime = performance.now();
+      }
+      draw();
+    })
+    .catch(() => {
+      draw(); // draw last known boxes
+    });
+
   }, "image/jpeg", 0.9);
 }
 
-function draw(dets) {
-  ctx.clearRect(0,0,SIZE,SIZE);
+/* =============== DRAW ===================== */
+function draw() {
+  ctx.clearRect(0, 0, SIZE, SIZE);
+
+  const now = performance.now();
+  if (now - lastUpdateTime > HOLD_TIME) {
+    lastDetections = [];
+  }
+
   ctx.strokeStyle = "lime";
   ctx.lineWidth = 2;
   ctx.font = "14px Arial";
   ctx.fillStyle = "lime";
 
-  dets.forEach(d => {
-    const [x1,y1,x2,y2] = d.bbox;
-    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
-    ctx.fillText(`ID ${d.id}`, x1, y1-5);
+  lastDetections.forEach(det => {
+    const [x1, y1, x2, y2] = det.bbox;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.fillText(`ID ${det.id}`, x1, y1 - 5);
   });
 
-  statusText.innerText = `Count: ${dets.length}`;
+  statusText.innerText = `Count: ${lastDetections.length}`;
 }
 </script>
+
+</body>
+</html>

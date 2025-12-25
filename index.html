@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection (Interpolated)</title>
+  <title>YOLO Hen Detection — Persistent Tracks</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -44,7 +44,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (Smooth Motion)</h3>
+<h3>YOLO Hen Detection (Persistent Tracks)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -60,7 +60,8 @@
 /* ================= CONFIG ================= */
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
-const INTERP_DURATION = 300; // ms
+const DETECT_INTERVAL = 400;
+const TRACK_TTL = 6; // frames
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
@@ -86,17 +87,8 @@ const capCtx = cap.getContext("2d");
 let running = false;
 let detectTimer = null;
 
-let boxes = []; // active boxes
-
-/* ================= BOX STRUCTURE ================= */
-/*
-{
-  prev: [x1,y1,x2,y2],
-  target: [x1,y1,x2,y2],
-  startTime: timestamp,
-  confidence: number
-}
-*/
+let tracks = [];
+let nextTrackId = 1;
 
 /* ================= START ================= */
 async function startLive() {
@@ -111,10 +103,8 @@ async function startLive() {
   video.onloadedmetadata = () => {
     video.play();
     running = true;
-
     detectLoop();
     requestAnimationFrame(renderLoop);
-
     statusText.innerText = "Live";
   };
 }
@@ -130,7 +120,7 @@ function stopLive() {
     video.srcObject = null;
   }
 
-  boxes = [];
+  tracks = [];
   ctx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
@@ -150,36 +140,31 @@ function detectLoop() {
     try {
       const res = await fetch(BACKEND_URL, { method: "POST", body: fd });
       const data = await res.json();
-      updateBoxes(data.detections);
+      updateTracks(data.detections);
     } catch {}
 
-    detectTimer = setTimeout(detectLoop, 400);
+    detectTimer = setTimeout(detectLoop, DETECT_INTERVAL);
   }, "image/jpeg", 0.9);
 }
 
-/* ================= UPDATE BOX TARGETS ================= */
-function updateBoxes(dets) {
-  const now = performance.now();
+/* ================= TRACK UPDATE (STEP 1) ================= */
+function updateTracks(detections) {
+  // Decrease TTL for all existing tracks
+  tracks.forEach(t => t.ttl--);
 
-  boxes = dets.map((d, i) => {
-    const prev = boxes[i]?.target || d.bbox;
-    return {
-      prev: prev,
-      target: d.bbox,
-      startTime: now,
-      confidence: d.confidence
-    };
+  // Create new tracks for each detection
+  detections.forEach(det => {
+    tracks.push({
+      id: nextTrackId++,
+      bbox: det.bbox,
+      confidence: det.confidence,
+      ttl: TRACK_TTL,
+      age: 0
+    });
   });
-}
 
-/* ================= INTERPOLATION ================= */
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-function interpBox(box) {
-  const t = Math.min((performance.now() - box.startTime) / INTERP_DURATION, 1);
-  return box.prev.map((v, i) => lerp(v, box.target[i], t));
+  // Remove expired tracks
+  tracks = tracks.filter(t => t.ttl > 0);
 }
 
 /* ================= RENDER ================= */
@@ -193,16 +178,18 @@ function renderLoop() {
   ctx.strokeStyle = "lime";
   ctx.fillStyle = "lime";
 
-  boxes.forEach(box => {
-    const [x1, y1, x2, y2] = interpBox(box);
+  tracks.forEach(t => {
+    const [x1, y1, x2, y2] = t.bbox;
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     ctx.fillText(
-      `Hen ${box.confidence.toFixed(2)}`,
+      `Hen ${t.id}`,
       x1,
       Math.max(15, y1 - 5)
     );
+    t.age++;
   });
 
+  statusText.innerText = `Active tracks: ${tracks.length}`;
   requestAnimationFrame(renderLoop);
 }
 </script>

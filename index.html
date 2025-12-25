@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>YOLO Hen Detection — IoU Tracking</title>
+  <title>YOLO Hen Detection (Interpolated)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -44,7 +44,7 @@
 
 <body>
 
-<h3>YOLO Hen Detection (IoU-Based Tracking)</h3>
+<h3>YOLO Hen Detection (Smooth Motion)</h3>
 
 <div class="camera-box">
   <video id="video" autoplay muted playsinline></video>
@@ -60,9 +60,7 @@
 /* ================= CONFIG ================= */
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
-const DETECT_INTERVAL = 400;
-const TRACK_TTL = 6;
-const IOU_THRESHOLD = 0.3;
+const INTERP_DURATION = 300; // ms
 
 /* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
@@ -87,8 +85,18 @@ const capCtx = cap.getContext("2d");
 /* ================= STATE ================= */
 let running = false;
 let detectTimer = null;
-let tracks = [];
-let nextTrackId = 1;
+
+let boxes = []; // active boxes
+
+/* ================= BOX STRUCTURE ================= */
+/*
+{
+  prev: [x1,y1,x2,y2],
+  target: [x1,y1,x2,y2],
+  startTime: timestamp,
+  confidence: number
+}
+*/
 
 /* ================= START ================= */
 async function startLive() {
@@ -103,8 +111,10 @@ async function startLive() {
   video.onloadedmetadata = () => {
     video.play();
     running = true;
+
     detectLoop();
     requestAnimationFrame(renderLoop);
+
     statusText.innerText = "Live";
   };
 }
@@ -113,13 +123,14 @@ async function startLive() {
 function stopLive() {
   running = false;
   clearTimeout(detectTimer);
+  detectTimer = null;
 
   if (video.srcObject) {
     video.srcObject.getTracks().forEach(t => t.stop());
     video.srcObject = null;
   }
 
-  tracks = [];
+  boxes = [];
   ctx.clearRect(0, 0, SIZE, SIZE);
   statusText.innerText = "Stopped";
 }
@@ -139,67 +150,36 @@ function detectLoop() {
     try {
       const res = await fetch(BACKEND_URL, { method: "POST", body: fd });
       const data = await res.json();
-      updateTracks(data.detections);
+      updateBoxes(data.detections);
     } catch {}
 
-    detectTimer = setTimeout(detectLoop, DETECT_INTERVAL);
+    detectTimer = setTimeout(detectLoop, 400);
   }, "image/jpeg", 0.9);
 }
 
-/* ================= IOU ================= */
-function iou(a, b) {
-  const xA = Math.max(a[0], b[0]);
-  const yA = Math.max(a[1], b[1]);
-  const xB = Math.min(a[2], b[2]);
-  const yB = Math.min(a[3], b[3]);
+/* ================= UPDATE BOX TARGETS ================= */
+function updateBoxes(dets) {
+  const now = performance.now();
 
-  const inter = Math.max(0, xB - xA) * Math.max(0, yB - yA);
-  const areaA = (a[2] - a[0]) * (a[3] - a[1]);
-  const areaB = (b[2] - b[0]) * (b[3] - b[1]);
-
-  return inter / (areaA + areaB - inter + 1e-6);
+  boxes = dets.map((d, i) => {
+    const prev = boxes[i]?.target || d.bbox;
+    return {
+      prev: prev,
+      target: d.bbox,
+      startTime: now,
+      confidence: d.confidence
+    };
+  });
 }
 
-/* ================= TRACK UPDATE ================= */
-function updateTracks(detections) {
-  // Decay all tracks
-  tracks.forEach(t => t.ttl--);
+/* ================= INTERPOLATION ================= */
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
 
-  const usedTracks = new Set();
-
-  detections.forEach(det => {
-    let bestMatch = null;
-    let bestIou = 0;
-
-    tracks.forEach(track => {
-      if (usedTracks.has(track.id)) return;
-      const score = iou(track.bbox, det.bbox);
-      if (score > bestIou) {
-        bestIou = score;
-        bestMatch = track;
-      }
-    });
-
-    if (bestMatch && bestIou > IOU_THRESHOLD) {
-      // Update existing track
-      bestMatch.bbox = det.bbox;
-      bestMatch.confidence = det.confidence;
-      bestMatch.ttl = TRACK_TTL;
-      usedTracks.add(bestMatch.id);
-    } else {
-      // Create new track
-      tracks.push({
-        id: nextTrackId++,
-        bbox: det.bbox,
-        confidence: det.confidence,
-        ttl: TRACK_TTL,
-        age: 0
-      });
-    }
-  });
-
-  // Remove expired tracks
-  tracks = tracks.filter(t => t.ttl > 0);
+function interpBox(box) {
+  const t = Math.min((performance.now() - box.startTime) / INTERP_DURATION, 1);
+  return box.prev.map((v, i) => lerp(v, box.target[i], t));
 }
 
 /* ================= RENDER ================= */
@@ -213,18 +193,16 @@ function renderLoop() {
   ctx.strokeStyle = "lime";
   ctx.fillStyle = "lime";
 
-  tracks.forEach(t => {
-    const [x1, y1, x2, y2] = t.bbox;
+  boxes.forEach(box => {
+    const [x1, y1, x2, y2] = interpBox(box);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     ctx.fillText(
-      `Hen ${t.id}`,
+      `Hen ${box.confidence.toFixed(2)}`,
       x1,
       Math.max(15, y1 - 5)
     );
-    t.age++;
   });
 
-  statusText.innerText = `Active tracks: ${tracks.length}`;
   requestAnimationFrame(renderLoop);
 }
 </script>

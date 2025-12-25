@@ -1,180 +1,62 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>YOLO Hen Detection (Accurate)</title>
-
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background: #111;
-      color: white;
-      font-family: Arial, sans-serif;
-      text-align: center;
-    }
-
-    .wrapper {
-      margin-top: 20px;
-    }
-
-    .camera-box {
-      position: relative;
-      width: 416px;
-      height: 416px;
-      margin: auto;
-      border: 2px solid #444;
-    }
-
-    video, canvas {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 416px;
-      height: 416px;
-    }
-
-    .controls {
-      margin-top: 15px;
-    }
-
-    button {
-      padding: 10px 16px;
-      font-size: 14px;
-      margin: 5px;
-    }
-
-    .status {
-      margin-top: 10px;
-      font-size: 14px;
-    }
-  </style>
-</head>
-
-<body>
-
-<h3>YOLO Hen Detection (Geometry-Correct)</h3>
-
-<div class="wrapper">
-  <div class="camera-box">
-    <video id="video" autoplay muted playsinline></video>
-    <canvas id="canvas"></canvas>
-  </div>
-
-  <div class="controls">
-    <button onclick="startLive()">Start</button>
-    <button onclick="stopLive()">Stop</button>
-  </div>
-
-  <div class="status" id="status">Idle</div>
-</div>
-
 <script>
-  const video = document.getElementById("video");
-  const canvas = document.getElementById("canvas");
-  const ctx = canvas.getContext("2d");
-  const statusText = document.getElementById("status");
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusText = document.getElementById("status");
 
-  const SIZE = 416;
-  let intervalId = null;
+const SIZE = 416;
+let intervalId = null;
 
-  let lastFrameTime = performance.now();
-  let fps = 0;
+async function startLive() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: "environment" } }
+  });
+  video.srcObject = stream;
 
-  async function startLive() {
-    if (intervalId) return;
+  video.onloadedmetadata = () => {
+    video.width = SIZE;
+    video.height = SIZE;
+    canvas.width = SIZE;
+    canvas.height = SIZE;
+    intervalId = setInterval(sendFrame, 300);
+    statusText.innerText = "Live";
+  };
+}
 
-    statusText.innerText = "Starting camera...";
+function stopLive() {
+  clearInterval(intervalId);
+  intervalId = null;
+  ctx.clearRect(0,0,SIZE,SIZE);
+}
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } }
-      });
+function sendFrame() {
+  ctx.drawImage(video, 0, 0, SIZE, SIZE);
+  canvas.toBlob(blob => {
+    const fd = new FormData();
+    fd.append("image", blob);
 
-      video.srcObject = stream;
+    fetch("https://unraided-camren-streamingly.ngrok-free.dev/predict", {
+      method: "POST",
+      body: fd
+    })
+    .then(r => r.json())
+    .then(data => draw(data.detections));
+  }, "image/jpeg", 0.9);
+}
 
-      video.onloadedmetadata = () => {
-        video.width = SIZE;
-        video.height = SIZE;
-        canvas.width = SIZE;
-        canvas.height = SIZE;
+function draw(dets) {
+  ctx.clearRect(0,0,SIZE,SIZE);
+  ctx.strokeStyle = "lime";
+  ctx.lineWidth = 2;
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "lime";
 
-        statusText.innerText = "Live detection";
-        intervalId = setInterval(sendFrame, 400);
-      };
+  dets.forEach(d => {
+    const [x1,y1,x2,y2] = d.bbox;
+    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+    ctx.fillText(`ID ${d.id}`, x1, y1-5);
+  });
 
-    } catch (err) {
-      statusText.innerText = "Camera error";
-      console.error(err);
-    }
-  }
-
-  function stopLive() {
-    clearInterval(intervalId);
-    intervalId = null;
-
-    if (video.srcObject) {
-      video.srcObject.getTracks().forEach(t => t.stop());
-      video.srcObject = null;
-    }
-
-    ctx.clearRect(0, 0, SIZE, SIZE);
-    statusText.innerText = "Stopped";
-  }
-
-  function sendFrame() {
-    ctx.drawImage(video, 0, 0, SIZE, SIZE);
-
-    canvas.toBlob(blob => {
-      if (!blob) return;
-
-      const formData = new FormData();
-      formData.append("image", blob, "frame.jpg");
-
-      fetch("https://unraided-camren-streamingly.ngrok-free.dev/predict", {
-        method: "POST",
-        body: formData
-      })
-      .then(res => res.json())
-      .then(data => {
-        const now = performance.now();
-        fps = 1000 / (now - lastFrameTime);
-        lastFrameTime = now;
-
-        drawBoxes(data.detections);
-
-        statusText.innerText =
-          `Detections: ${data.count} | ` +
-          `FPS: ${fps.toFixed(1)} | ` +
-          `Infer: ${data.timing.inference_ms} ms | ` +
-          `RTT: ${data.timing.total_ms} ms`;
-      })
-      .catch(() => {
-        statusText.innerText = "Detection error";
-      });
-
-    }, "image/jpeg", 0.9);
-  }
-
-  function drawBoxes(dets) {
-    ctx.clearRect(0, 0, SIZE, SIZE);
-    ctx.lineWidth = 2;
-    ctx.font = "14px Arial";
-    ctx.strokeStyle = "red";
-    ctx.fillStyle = "red";
-
-    dets.forEach(det => {
-      const [x1, y1, x2, y2] = det.bbox;
-      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-      ctx.fillText(
-        `Hen ${det.confidence.toFixed(2)}`,
-        x1,
-        y1 > 15 ? y1 - 5 : 15
-      );
-    });
-  }
+  statusText.innerText = `Count: ${dets.length}`;
+}
 </script>
-
-</body>
-</html>

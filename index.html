@@ -65,11 +65,11 @@
 <div class="status" id="status">Idle</div>
 
 <script>
-/* ================== CONFIG ================== */
+/* ================= CONFIG ================= */
 const SIZE = 416;
 const BACKEND_URL = "https://unraided-camren-streamingly.ngrok-free.dev/predict";
 
-/* ================== ELEMENTS ================== */
+/* ================= ELEMENTS ================= */
 const video = document.getElementById("video");
 const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
@@ -78,30 +78,37 @@ const statusText = document.getElementById("status");
 canvas.width = SIZE;
 canvas.height = SIZE;
 
-/* ================== STATE ================== */
+/* ================= STATE ================= */
 let running = false;
 let detectInterval = null;
 let latestDetections = [];
 let lastFrameTime = performance.now();
 
-/* ================== START ================== */
+/* ================= START ================= */
 async function startLive() {
   if (running) return;
+
+  statusText.innerText = "Starting camera...";
 
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" } }
   });
 
   video.srcObject = stream;
-  running = true;
 
-  detectInterval = setInterval(sendFrameForDetection, 400);
-  requestAnimationFrame(renderLoop);
+  // ✅ WAIT until video is actually ready
+  video.onloadedmetadata = () => {
+    video.play();
 
-  statusText.innerText = "Live detection";
+    running = true;
+    detectInterval = setInterval(sendFrameForDetection, 400);
+    requestAnimationFrame(renderLoop);
+
+    statusText.innerText = "Live detection";
+  };
 }
 
-/* ================== STOP ================== */
+/* ================= STOP ================= */
 function stopLive() {
   running = false;
   clearInterval(detectInterval);
@@ -117,9 +124,9 @@ function stopLive() {
   statusText.innerText = "Stopped";
 }
 
-/* ================== DETECTION LOOP ================== */
+/* ================= DETECTION LOOP ================= */
 function sendFrameForDetection() {
-  if (!running) return;
+  if (!running || video.videoWidth === 0) return;
 
   const offscreen = document.createElement("canvas");
   offscreen.width = SIZE;
@@ -155,7 +162,7 @@ function sendFrameForDetection() {
   }, "image/jpeg", 0.9);
 }
 
-/* ================== RENDER LOOP (NO BLINK) ================== */
+/* ================= RENDER LOOP ================= */
 function renderLoop() {
   if (!running) return;
 

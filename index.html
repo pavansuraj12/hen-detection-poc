@@ -131,7 +131,7 @@
       const formData = new FormData();
       formData.append("image", blob, "frame.jpg");
 
-      fetch("https://unraided-camren-streamingly.ngrok-free.dev", {
+      fetch("https://unraided-camren-streamingly.ngrok-free.dev/predict", {
         method: "POST",
         body: formData
       })
